@@ -4,28 +4,26 @@ import collections
 import time
 from ultralytics import YOLO
 
-# Αφαιρέσαμε τα χρώματα. Τώρα ορίζουμε το ελάχιστο μέγεθος του φωτός (σε pixels)
-MIN_SIREN_AREA = 30  # Το κατέβασα λίγο γιατί ο πυρήνας ενός LED φαίνεται μικρός στην κάμερα
-
-model = YOLO('vehicles.pt')
-
+# ΑΥΞΗΘΗΚΕ: Πρέπει να βρει τουλάχιστον 150 pixels έντονου χρώματος για να το θεωρήσει φάρο
+MIN_SIREN_AREA = 150
+model = YOLO('vehiclesv2.pt')
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
 if not cap.isOpened():
-    print("ΣΦΑΛΜΑ: Η κάμερα δεν βρέθηκε!")
+    print("Error: Camera not found!")
     exit()
 
-# Ζέσταμα κάμερας (Warm-up)
+# (Warm-up)
 for i in range(30):
     cap.read()
 time.sleep(1)
 
 ret, frame = cap.read()
 if not ret or frame is None:
-    print("ΣΦΑΛΜΑ: Η κάμερα δεν τράβηξε εικόνα.")
+    print("Error: Camera did not capture anything!")
     exit()
 
-# --- CALIBRATION MODE (8 ΚΛΙΚ ΓΙΑ 2 ΔΡΟΜΟΥΣ) ---
+# --- CALIBRATION MODE ---
 points = []
 
 
@@ -79,12 +77,37 @@ while True:
     emergency_q1 = 0
     emergency_q2 = 0
 
-    # Μετατρέπουμε την εικόνα σε ασπρόμαυρη (Grayscale)
-    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-    # Κρατάμε ΜΟΝΟ τα πολύ φωτεινά σημεία (τιμές από 230 έως 255)
-    # Αυτό θα πιάσει οποιοδήποτε έντονο λαμπάκι (κόκκινο, μπλε, κίτρινο, λευκό)
-    _, siren_mask = cv2.threshold(gray_frame, 100, 255, cv2.THRESH_BINARY)
+    # ΠΙΟ ΑΥΣΤΗΡΑ ΟΡΙΑ: Saturation > 180 και Value > 180 (Πιάνει μόνο λαμπερά LED)
+    lower_red_1 = np.array([0, 180, 180])
+    upper_red_1 = np.array([10, 255, 255])
+    lower_red_2 = np.array([170, 180, 180])
+    upper_red_2 = np.array([180, 255, 255])
+
+    mask_red_1 = cv2.inRange(hsv_frame, lower_red_1, upper_red_1)
+    mask_red_2 = cv2.inRange(hsv_frame, lower_red_2, upper_red_2)
+    mask_red = cv2.bitwise_or(mask_red_1, mask_red_2)
+
+    lower_blue = np.array([100, 180, 255])
+    upper_blue = np.array([140, 255, 255])
+    mask_blue = cv2.inRange(hsv_frame, lower_blue, upper_blue)
+
+    siren_mask = cv2.bitwise_or(mask_red, mask_blue)
+
+    # --- VISUAL DETECTION OF BLUE BEACON ---
+    # Find contours specifically in the blue mask
+    contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours_blue:
+        area = cv2.contourArea(cnt)
+        if area > MIN_SIREN_AREA:
+            # Get bounding box for the beacon
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            cx, cy = bx + bw // 2, by + bh // 2
+
+            # Draw a highly visible box around the blue beacon
+            cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (255, 255, 0), 3)
+            cv2.putText(frame, "BLUE BEACON", (bx, by - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
     cv2.polylines(frame, [poly_q1], isClosed=True, color=(255, 0, 0), thickness=2)
     cv2.polylines(frame, [poly_q2], isClosed=True, color=(0, 255, 0), thickness=2)
@@ -100,10 +123,20 @@ while True:
     history_q1.append(pixels_q1)
     history_q2.append(pixels_q2)
 
-    # --- Έλεγχος Έκτακτης Ανάγκης στην Ουρά 1 ---
+    # --- ΕΞΥΠΝΟΣ ΕΛΕΓΧΟΣ ΟΥΡΑΣ 1 (Μετράει αναβοσβήματα) ---
     is_blinking_q1 = False
-    if len(history_q1) == 30 and max(history_q1) > MIN_SIREN_AREA and min(history_q1) < (MIN_SIREN_AREA // 2):
-        is_blinking_q1 = True
+    if len(history_q1) == 30:
+        flashes_q1 = 0
+        is_on_q1 = False
+        for pixels in history_q1:
+            if pixels > MIN_SIREN_AREA and not is_on_q1:
+                is_on_q1 = True
+                flashes_q1 += 1
+            elif pixels < (MIN_SIREN_AREA // 2) and is_on_q1:
+                is_on_q1 = False
+
+        if flashes_q1 >= 2:  # Αν άναψε τουλάχιστον 2 φορές σε ~1 δευτερόλεπτο
+            is_blinking_q1 = True
 
     if is_blinking_q1:
         if blink_start_time_q1 == 0.0:
@@ -114,10 +147,20 @@ while True:
     else:
         blink_start_time_q1 = 0.0
 
-    # --- Έλεγχος Έκτακτης Ανάγκης στην Ουρά 2 ---
+    # --- ΕΞΥΠΝΟΣ ΕΛΕΓΧΟΣ ΟΥΡΑΣ 2 (Μετράει αναβοσβήματα) ---
     is_blinking_q2 = False
-    if len(history_q2) == 30 and max(history_q2) > MIN_SIREN_AREA and min(history_q2) < (MIN_SIREN_AREA // 2):
-        is_blinking_q2 = True
+    if len(history_q2) == 30:
+        flashes_q2 = 0
+        is_on_q2 = False
+        for pixels in history_q2:
+            if pixels > MIN_SIREN_AREA and not is_on_q2:
+                is_on_q2 = True
+                flashes_q2 += 1
+            elif pixels < (MIN_SIREN_AREA // 2) and is_on_q2:
+                is_on_q2 = False
+
+        if flashes_q2 >= 2:
+            is_blinking_q2 = True
 
     if is_blinking_q2:
         if blink_start_time_q2 == 0.0:
@@ -135,12 +178,23 @@ while True:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
+            # Λήψη του ID της κλάσης και του ονόματος (π.χ. 'car', 'ambulance')
+            cls_id = int(box.cls[0])
+            class_name = model.names[cls_id]
+
+            # Προαιρετικό: Αν το YOLO πιάσει "police" ή "ambulance", μπορείς να το δέσεις με το emergency
+            # if class_name in ['police', 'ambulance']:
+            #    ... (πρόσθετη λογική αν θέλεις)
+
             if cv2.pointPolygonTest(poly_q1, (cx, cy), False) >= 0:
                 score_q1 += 1.0
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                cv2.putText(frame, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
             elif cv2.pointPolygonTest(poly_q2, (cx, cy), False) >= 0:
                 score_q2 += 1.0
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     with open("queue_data.txt", "w") as f:
         f.write(f"{score_q1},{score_q2},{emergency_q1},{emergency_q2}")
@@ -149,6 +203,9 @@ while True:
     cv2.putText(frame, f"Q2 VEHICLES: {score_q2}", (350, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
     cv2.imshow("Traffic Camera", frame)
+
+    # ΝΕΟ ΠΑΡΑΘΥΡΟ: Δείχνει ασπρόμαυρα ΜΟΝΟ ό,τι πιάνει ως φάρο
+    cv2.imshow("Siren Mask Debug", siren_mask)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
