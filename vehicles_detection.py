@@ -5,7 +5,6 @@ import time
 import sounddevice as sd
 from ultralytics import YOLO
 
-# --- ΡΥΘΜΙΣΕΙΣ ΗΧΟΥ ---
 SAMPLE_RATE = 44100
 CHUNK = 8192
 MIN_FREQ = 800
@@ -46,11 +45,9 @@ def audio_callback(indata, frames, time_info, status):
         print("🔊 (Στο παρασκήνιο): Ανιχνεύθηκε Ήχος Σειρήνας!")
 
 
-# Ξεκινάμε το stream ήχου
 audio_stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, callback=audio_callback, blocksize=CHUNK)
 audio_stream.start()
 
-# --- ΑΡΧΙΚΟΠΟΙΗΣΗ ΟΡΑΣΗΣ ---
 model = YOLO('vehiclesv2.pt')
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
@@ -67,9 +64,7 @@ if not ret or frame is None:
     print("Error: Camera did not capture anything!")
     exit()
 
-# --- CALIBRATION MODE ---
 points = []
-
 
 def select_points(event, x, y, flags, param):
     if event == cv2.EVENT_LBUTTONDOWN:
@@ -116,10 +111,9 @@ emergency_q1_until = 0.0
 emergency_q2_until = 0.0
 EMERGENCY_HOLD_TIME = 3.0
 
-# ΝΕΑ: Χρονοδιακόπτες για την ομαλοποίηση της οπτικής αναγνώρισης (γεφυρώνουν το κενό της περιστροφής)
 visual_hold_q1 = 0.0
 visual_hold_q2 = 0.0
-VISUAL_HOLD_TIME = 1.5  # Πόσα δευτερόλεπτα να θυμάται το φως ανάμεσα στις περιστροφές
+VISUAL_HOLD_TIME = 1.5
 
 while True:
     ret, frame = cap.read()
@@ -131,32 +125,25 @@ while True:
     emergency_q1 = 0
     emergency_q2 = 0
 
-    # --- ΕΛΕΓΧΟΣ ΗΧΟΥ ΣΤΗΝ ΚΥΡΙΑ ΛΟΥΠΑ ---
     if time.time() - last_audio_time > 2.0:
         siren_audio_active = False
 
     if siren_audio_active:
         cv2.putText(frame, "AUDIO SIREN DETECTED!", (180, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 3)
 
-    # --- 1. ΟΠΤΙΚΗ ΑΝΙΧΝΕΥΣΗ ΦΑΡΟΥ ---
     hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
     lower_red_1 = np.array([0, 150, 180])
     upper_red_1 = np.array([10, 255, 255])
     lower_red_2 = np.array([170, 150, 180])
     upper_red_2 = np.array([180, 255, 255])
     mask_red = cv2.bitwise_or(cv2.inRange(hsv_frame, lower_red_1, upper_red_1),
                               cv2.inRange(hsv_frame, lower_red_2, upper_red_2))
-
     lower_blue = np.array([95, 120, 210])
     upper_blue = np.array([140, 255, 255])
     mask_blue = cv2.inRange(hsv_frame, lower_blue, upper_blue)
-
     siren_mask = cv2.bitwise_or(mask_red, mask_blue)
-
     cv2.polylines(frame, [poly_q1], isClosed=True, color=(255, 0, 0), thickness=2)
     cv2.polylines(frame, [poly_q2], isClosed=True, color=(0, 255, 0), thickness=2)
-
     mask_poly_q1 = np.zeros(frame.shape[:2], dtype=np.uint8)
     mask_poly_q2 = np.zeros(frame.shape[:2], dtype=np.uint8)
     cv2.fillPoly(mask_poly_q1, [poly_q1], 255)
@@ -168,7 +155,6 @@ while True:
     history_q1.append(pixels_q1)
     history_q2.append(pixels_q2)
 
-    # --- 2. ΕΞΥΠΝΟΣ ΕΛΕΓΧΟΣ ΟΥΡΑΣ 1 (DEEP DROP RULE & VISUAL HOLD) ---
     if len(history_q1) == 30:
         max_p1 = max(history_q1)
         min_p1 = min(history_q1)
@@ -186,17 +172,14 @@ while True:
                     if (history_q1[i - 1] > mean_p1) != (history_q1[i] > mean_p1):
                         crossings_q1 += 1
 
-                # Αν βρούμε το μοτίβο, ανανεώνουμε τον χρονοδιακόπτη!
                 if crossings_q1 >= 6:
                     visual_hold_q1 = time.time() + VISUAL_HOLD_TIME
 
-    # Η οπτική σειρήνα θεωρείται ενεργή αν δεν έχει λήξει ο χρονοδιακόπτης της
     is_visual_active_q1 = time.time() < visual_hold_q1
 
     if is_visual_active_q1:
         cv2.putText(frame, "VISUAL SIREN Q1!", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-    # Έλεγχος Έκτακτης Ανάγκης (Σταθερό πλέον)
     if is_visual_active_q1 and siren_audio_active:
         if blink_start_time_q1 == 0.0:
             blink_start_time_q1 = time.time()
@@ -209,7 +192,6 @@ while True:
         emergency_q1 = 1
         cv2.putText(frame, "EMERGENCY Q1 CONFIRMED!", (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
 
-    # --- 3. ΕΞΥΠΝΟΣ ΕΛΕΓΧΟΣ ΟΥΡΑΣ 2 (DEEP DROP RULE & VISUAL HOLD) ---
     if len(history_q2) == 30:
         max_p2 = max(history_q2)
         min_p2 = min(history_q2)
@@ -225,17 +207,14 @@ while True:
                     if (history_q2[i - 1] > mean_p2) != (history_q2[i] > mean_p2):
                         crossings_q2 += 1
 
-                # Αν βρούμε το μοτίβο, ανανεώνουμε τον χρονοδιακόπτη!
                 if crossings_q2 >= 6:
                     visual_hold_q2 = time.time() + VISUAL_HOLD_TIME
 
-    # Η οπτική σειρήνα θεωρείται ενεργή αν δεν έχει λήξει ο χρονοδιακόπτης της
     is_visual_active_q2 = time.time() < visual_hold_q2
 
     if is_visual_active_q2:
         cv2.putText(frame, "VISUAL SIREN Q2!", (350, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-    # Έλεγχος Έκτακτης Ανάγκης (Σταθερό πλέον)
     if is_visual_active_q2 and siren_audio_active:
         if blink_start_time_q2 == 0.0:
             blink_start_time_q2 = time.time()
@@ -248,7 +227,6 @@ while True:
         emergency_q2 = 1
         cv2.putText(frame, "EMERGENCY Q2 CONFIRMED!", (350, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
 
-    # --- ΥΠΟΛΟΓΙΣΜΟΣ ΒΑΡΟΥΣ (WEIGHTED VEHICLES) ---
     for r in results:
         boxes = r.boxes
         for box in boxes:
